@@ -15,11 +15,6 @@
 import unittest
 from unittest.mock import MagicMock, patch
 from datetime import datetime
-import sys
-import os
-
-# Add parent directory of current file (src directory) to the path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from embedding_utils import (
     get_latest_lock_timestamp,
@@ -63,10 +58,55 @@ class TestEmbeddingUtils(unittest.TestCase):
         )
 
         nodes = list(get_updated_nodes(mock_database, None, ["Topic"]))
+        
+        # Verify Spanner call
+        mock_snapshot.execute_sql.assert_called_once()
+        args, kwargs = mock_snapshot.execute_sql.call_args
+        query = args[0]
+        self.assertIn("SELECT subject_id, name, types FROM Node", query)
+        self.assertIn("TRUE", query)
+        self.assertEqual(kwargs["params"], {"node_types": ["Topic"]})
+
         self.assertEqual(len(nodes), 1)
         self.assertEqual(nodes[0]["subject_id"], "dc/1")
         self.assertEqual(nodes[0]["name"], "Node 1")
         self.assertEqual(nodes[0]["types"], ["Topic"])
+
+    def test_get_updated_nodes_with_timestamp(self):
+        mock_database = MagicMock()
+        mock_snapshot = MagicMock()
+        mock_database.snapshot.return_value.__enter__.return_value = mock_snapshot
+
+        class MockField:
+            def __init__(self, name):
+                self.name = name
+
+        class MockResults:
+            def __init__(self, rows, field_names):
+                self.rows = rows
+                self.fields = [MockField(name) for name in field_names]
+
+            def __iter__(self):
+                return iter(self.rows)
+
+        mock_snapshot.execute_sql.return_value = MockResults(
+            rows=[("dc/2", "Node 2", ["Topic"])],
+            field_names=["subject_id", "name", "types"]
+        )
+
+        test_timestamp = datetime(2026, 4, 25, 0, 0, 0)
+        nodes = list(get_updated_nodes(mock_database, test_timestamp, ["Topic"]))
+        
+        # Verify Spanner call
+        mock_snapshot.execute_sql.assert_called_once()
+        args, kwargs = mock_snapshot.execute_sql.call_args
+        query = args[0]
+        self.assertIn("SELECT subject_id, name, types FROM Node", query)
+        self.assertIn("update_timestamp > @timestamp", query)
+        self.assertEqual(kwargs["params"], {"node_types": ["Topic"], "timestamp": test_timestamp})
+
+        self.assertEqual(len(nodes), 1)
+        self.assertEqual(nodes[0]["subject_id"], "dc/2")
 
     def test_filter_and_convert_nodes(self):
         nodes = [
@@ -96,9 +136,11 @@ class TestEmbeddingUtils(unittest.TestCase):
             ("dc/8", "Node 8", ["Topic"])
         ]
 
+        transactions = []
         def side_effect(func):
             mock_transaction = MagicMock()
             mock_transaction.execute_update.return_value = 2
+            transactions.append(mock_transaction)
             return func(mock_transaction)
 
         mock_database.run_in_transaction.side_effect = side_effect
@@ -106,6 +148,19 @@ class TestEmbeddingUtils(unittest.TestCase):
         affected_rows = generate_embeddings_partitioned(mock_database, nodes)
         self.assertEqual(affected_rows, 8)
         self.assertEqual(mock_database.run_in_transaction.call_count, 4)
+        
+        # Verify execute_update calls
+        self.assertEqual(len(transactions), 4)
+        for i, tx in enumerate(transactions):
+            tx.execute_update.assert_called_once()
+            args, kwargs = tx.execute_update.call_args
+            self.assertIn("INSERT OR UPDATE INTO NodeEmbeddings", args[0])
+            
+            # Verify batch content
+            batch = kwargs["params"]["nodes"]
+            self.assertEqual(len(batch), 2)
+            self.assertEqual(batch[0][0], f"dc/{i*2 + 1}")
+            self.assertEqual(batch[1][0], f"dc/{i*2 + 2}")
 
 if __name__ == '__main__':
     unittest.main()
