@@ -122,10 +122,10 @@ def generate_embeddings_partitioned(database, nodes_generator):
     logging.info(f"Generating embeddings in batches of {_BATCH_SIZE}.")
 
     embeddings_sql = """
-        INSERT OR UPDATE INTO NodeEmbeddings (subject_id, embedding_content, embeddings, types)
+        INSERT OR UPDATE INTO NodeEmbedding (subject_id, embedding_content, embeddings, types)
         SELECT subject_id, content, embeddings.values, types
         FROM ML.PREDICT(
-            MODEL text_embeddings,
+            MODEL NodeEmbeddingModel,
             (SELECT subject_id, embedding_content AS content, types, "RETRIEVAL_QUERY" AS task_type FROM UNNEST(@nodes))
         )
     """
